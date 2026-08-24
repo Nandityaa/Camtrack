@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Gesture Particle System</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Courier New', monospace;
+            background: #000;
+            overflow: hidden;
+        }
+
+        #container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+        }
+
+        #videoElement {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 240px;
+            height: 180px;
+            border: 2px solid #00ff00;
+            border-radius: 8px;
+            transform: scaleX(-1);
+            z-index: 10;
+            opacity: 0.8;
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #00ffff;
+            font-size: 18px;
+            text-align: center;
+            z-index: 100;
+        }
+
+        #loading.hidden {
+            display: none;
+        }
+
+        .spinner {
+            border: 4px solid rgba(0, 255, 255, 0.1);
+            border-top: 4px solid #00ffff;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        #instructions {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 14px;
+            text-align: center;
+            z-index: 10;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 15px 25px;
+            border-radius: 10px;
+        }
+
+        .lil-gui {
+            --width: 280px;
+            --widget-height: 25px;
+            --name-width: 50%;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="container"></div>
+    <video id="videoElement" autoplay playsinline></video>
+
+    <div id="loading">
+        <div class="spinner"></div>
+        <div>Loading 3D Scene & Hand Tracking...</div>
+        <div style="font-size:12px; margin-top:10px; opacity:0.7;">This may take 20-30 seconds</div>
+    </div>
+
+    <div id="instructions">
+        <div style="margin-bottom:8px; font-weight:bold; color:#00ffff;">✋ HAND CONTROLS</div>
+        <div><strong>Left Hand (Selector):</strong> 1 finger = "Hello" | 2 fingers = "My Name Is" | 3 fingers =
+            "Nanditya"</div>
+        <div style="margin-top:5px;"><strong>Right Hand (Effector):</strong> ✊ Fist = Attract | 🖐 Open = Explode</div>
+    </div>
+
+    <!-- Three.js r149 (last version with legacy script support) -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.149.0/examples/js/loaders/FontLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.149.0/examples/js/geometries/TextGeometry.js"></script>
+
+    <!-- lil-gui -->
+    <script src="https://cdn.jsdelivr.net/npm/lil-gui@0.19.0/dist/lil-gui.umd.min.js"></script>
+
+    <!-- MediaPipe Hands -->
+    <script src="https://unpkg.com/@mediapipe/hands@0.4/hands.js"></script>
+    <script src="https://unpkg.com/@mediapipe/camera_utils@0.3/camera_utils.js"></script>
+
+    <script>
+        // ============================================
+        // 3D GESTURE-CONTROLLED PARTICLE SYSTEM
+        // ============================================
+
+        class ParticleTextApp {
+            constructor() {
+                this.container = document.getElementById('container');
+                this.video = document.getElementById('videoElement');
+                this.loading = document.getElementById('loading');
+
+                // Three.js
+                this.scene = null;
+                this.camera = null;
+                this.renderer = null;
+                this.particles = null;
+                this.particleCount = 8000;
+
+                // Particle data
+                this.particlePositions = null;
+                this.particleVelocities = null;
+                this.particleHomePositions = null;
+                this.currentText = "HELLO";
+
+                // MediaPipe
+                this.hands = null;
+                this.handsData = [];
+
+                // Gesture state
+                this.handA = null; // Selector (left)
+                this.handB = null; // Effector (right)
+                this.physicsMode = 'attract'; // 'attract' or 'explode'
+
+                // GUI params
+                this.params = {
+                    particleColor: '#00ffff',
+                    particleSize: 2.0,
+                    explosionForce: 15.0,
+                    attractForce: 0.15,
+                    damping: 0.95,
+                    fullscreen: () => this.toggleFullscreen()
+                };
+
+                this.init();
+            }
+
+            async init() {
+                try {
+                    // Setup Three.js
+                    this.setupThreeJS();
+
+                    // Create initial text
+                    this.createTextParticles(this.currentText);
+
+                    // Setup camera & MediaPipe
+                    await this.setupCamera();
+                    await this.setupHandTracking();
+
+                    // Setup GUI
+                    this.setupGUI();
+
+                    // Hide loading
+                    this.loading.classList.add('hidden');
+
+                    // Start animation
+                    this.animate();
+
+                    console.log('✅ App ready!');
+                } catch (error) {
+                    console.error('Init error:', error);
+                    document.querySelector('#loading div').textContent = 'Error: ' + error.message;
+                }
+            }
+
+            setupThreeJS() {
+                // Scene
+                this.scene = new THREE.Scene();
+                this.scene.background = new THREE.Color(0x000000);
+                this.scene.fog = new THREE.Fog(0x000000, 50, 200);
+
+                // Camera
+                this.camera = new THREE.PerspectiveCamera(
+                    75,
+                    window.innerWidth / window.innerHeight,
+                    0.1,
+                    1000
+                );
+                this.camera.position.z = 50;
+
+                // Renderer
+                this.renderer = new THREE.WebGLRenderer({ antialias: true });
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.setPixelRatio(window.devicePixelRatio);
+                this.container.appendChild(this.renderer.domElement);
+
+                // Lights
+                const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+                this.scene.add(ambientLight);
+
+                const pointLight = new THREE.PointLight(0x00ffff, 1, 100);
+                pointLight.position.set(0, 10, 20);
+                this.scene.add(pointLight);
+
+                // Window resize
+                window.addEventListener('resize', () => this.onWindowResize());
+
+                console.log('✅ Three.js setup complete');
+            }
+
+            createTextParticles(text) {
+                // Remove old particles
+                if (this.particles) {
+                    this.scene.remove(this.particles);
+                    this.particles.geometry.dispose();
+                    this.particles.material.dispose();
+                }
+
+                // Create text geometry
+                const loader = new THREE.FontLoader();
+                loader.load('https://threejs.org/examples/fonts/helvetiker_bold.typeface.json', (font) => {
+                    const textGeometry = new THREE.TextGeometry(text, {
+                        font: font,
+                        size: 8,
+                        height: 2,
+                        curveSegments: 12,
+                        bevelEnabled: true,
+                        bevelThickness: 0.5,
+                        bevelSize: 0.3,
+                        bevelOffset: 0,
+                        bevelSegments: 5
+                    });
+
+                    textGeometry.center();
+
+                    // Sample points from geometry
+                    const positions = [];
+                    const vertices = textGeometry.attributes.position;
+
+                    for (let i = 0; i < this.particleCount; i++) {
+                        const randomIndex = Math.floor(Math.random() * vertices.count);
+                        positions.push(
+                            vertices.getX(randomIndex),
+                            vertices.getY(randomIndex),
+                            vertices.getZ(randomIndex)
+                        );
+                    }
+
+                    // Store home positions
+                    this.particleHomePositions = new Float32Array(positions);
+                    this.particlePositions = new Float32Array(positions);
+                    this.particleVelocities = new Float32Array(this.particleCount * 3).fill(0);
+
+                    // Create particle system
+                    const geometry = new THREE.BufferGeometry();
+                    geometry.setAttribute('position', new THREE.BufferAttribute(this.particlePositions, 3));
+
+                    const material = new THREE.PointsMaterial({
+                        color: this.params.particleColor,
+                        size: this.params.particleSize,
+                        transparent: true,
+                        opacity: 0.8,
+                        blending: THREE.AdditiveBlending,
+                        depthWrite: false
+                    });
+
+                    this.particles = new THREE.Points(geometry, material);
+                    this.scene.add(this.particles);
+
+                    console.log(`✅ Created ${this.particleCount} particles for "${text}"`);
+                });
+            }
+
+            async setupCamera() {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
+                        facingMode: 'user'
+                    },
+                    audio: false
+                });
+
+                this.video.srcObject = stream;
+
+                await new Promise((resolve) => {
+                    this.video.onloadedmetadata = () => resolve();
+                });
+
+                console.log('✅ Camera ready');
+            }
+
+            async setupHandTracking() {
+                this.hands = new Hands({
+                    locateFile: (file) => {
+                        return `https://unpkg.com/@mediapipe/hands@0.4/${file}`;
+                    }
+                });
+
+                this.hands.setOptions({
+                    maxNumHands: 2,
+                    modelComplexity: 1,
+                    minDetectionConfidence: 0.7,
+                    minTrackingConfidence: 0.7
+                });
+
+                this.hands.onResults(this.onHandsResults.bind(this));
+
+                const camera = new Camera(this.video, {
+                    onFrame: async () => {
+                        await this.hands.send({ image: this.video });
+                    },
+                    width: 1280,
+                    height: 720
+                });
+
+                camera.start();
+
+                console.log('✅ Hand tracking ready');
+            }
+
+            onHandsResults(results) {
+                this.handsData = [];
+
+                if (results.multiHandLandmarks && results.multiHandedness) {
+                    for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                        this.handsData.push({
+                            landmarks: results.multiHandLandmarks[i],
+                            label: results.multiHandedness[i].label
+                        });
+                    }
+                }
+
+                this.processGestures();
+            }
+
+            processGestures() {
+                if (this.handsData.length === 0) return;
+
+                // Assign hands
+                this.handA = null;
+                this.handB = null;
+
+                for (const hand of this.handsData) {
+                    if (hand.label === 'Left') {
+                        this.handA = hand; // Selector
+                    } else if (hand.label === 'Right') {
+                        this.handB = hand; // Effector
+                    }
+                }
+
+                // Hand A: Content selection (finger count)
+                if (this.handA) {
+                    const fingerCount = this.countFingers(this.handA.landmarks);
+
+                    let newText = this.currentText;
+                    if (fingerCount === 1) newText = "HELLO";
+                    else if (fingerCount === 2) newText = "MY NAME IS";
+                    else if (fingerCount === 3) newText = "NANDITYA";
+
+                    if (newText !== this.currentText) {
+                        this.currentText = newText;
+                        this.createTextParticles(newText);
+                    }
+                }
+
+                // Hand B: Physics control (fist/open)
+                if (this.handB) {
+                    if (this.isFist(this.handB.landmarks)) {
+                        this.physicsMode = 'attract';
+                    } else if (this.isOpenHand(this.handB.landmarks)) {
+                        this.physicsMode = 'explode';
+                    }
+                }
+            }
+
+            countFingers(landmarks) {
+                let count = 0;
+                const fingerTips = [8, 12, 16, 20]; // Index, Middle, Ring, Pinky
+                const fingerPips = [6, 10, 14, 18];
+
+                for (let i = 0; i < fingerTips.length; i++) {
+                    if (landmarks[fingerTips[i]].y < landmarks[fingerPips[i]].y - 0.02) {
+                        count++;
+                    }
+                }
+
+                return count;
+            }
+
+            isFist(landmarks) {
+                // All fingertips close to palm center
+                const palm = landmarks[0];
+                let allClose = true;
+
+                const fingerTips = [4, 8, 12, 16, 20];
+                for (const tip of fingerTips) {
+                    const dist = this.distance3D(landmarks[tip], palm);
+                    if (dist > 0.12) {
+                        allClose = false;
+                        break;
+                    }
+                }
+
+                return allClose;
+            }
+
+            isOpenHand(landmarks) {
+                // All fingers extended and spread
+                const fingerCount = this.countFingers(landmarks);
+                return fingerCount >= 4;
+            }
+
+            distance3D(p1, p2) {
+                const dx = p1.x - p2.x;
+                const dy = p1.y - p2.y;
+                const dz = (p1.z || 0) - (p2.z || 0);
+                return Math.sqrt(dx * dx + dy * dy + dz * dz);
+            }
+
+            updateParticles() {
+                if (!this.particles || !this.particlePositions) return;
+
+                const positions = this.particlePositions;
+                const velocities = this.particleVelocities;
+                const homes = this.particleHomePositions;
+
+                for (let i = 0; i < this.particleCount; i++) {
+                    const i3 = i * 3;
+
+                    if (this.physicsMode === 'attract') {
+                        // Pull to home position
+                        const dx = homes[i3] - positions[i3];
+                        const dy = homes[i3 + 1] - positions[i3 + 1];
+                        const dz = homes[i3 + 2] - positions[i3 + 2];
+
+                        velocities[i3] += dx * this.params.attractForce;
+                        velocities[i3 + 1] += dy * this.params.attractForce;
+                        velocities[i3 + 2] += dz * this.params.attractForce;
+
+                    } else if (this.physicsMode === 'explode') {
+                        // Push away from center
+                        const dx = positions[i3];
+                        const dy = positions[i3 + 1];
+                        const dz = positions[i3 + 2];
+                        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+                        if (dist > 0.1) {
+                            velocities[i3] += (dx / dist) * this.params.explosionForce * 0.1;
+                            velocities[i3 + 1] += (dy / dist) * this.params.explosionForce * 0.1;
+                            velocities[i3 + 2] += (dz / dist) * this.params.explosionForce * 0.1;
+                        }
+                    }
+
+                    // Apply velocity
+                    positions[i3] += velocities[i3];
+                    positions[i3 + 1] += velocities[i3 + 1];
+                    positions[i3 + 2] += velocities[i3 + 2];
+
+                    // Damping
+                    velocities[i3] *= this.params.damping;
+                    velocities[i3 + 1] *= this.params.damping;
+                    velocities[i3 + 2] *= this.params.damping;
+                }
+
+                this.particles.geometry.attributes.position.needsUpdate = true;
+            }
+
+            setupGUI() {
+                const gui = new lil.GUI();
+
+                gui.addColor(this.params, 'particleColor').onChange((value) => {
+                    if (this.particles) {
+                        this.particles.material.color.set(value);
+                    }
+                });
+
+                gui.add(this.params, 'particleSize', 0.5, 5.0).onChange((value) => {
+                    if (this.particles) {
+                        this.particles.material.size = value;
+                    }
+                });
+
+                gui.add(this.params, 'explosionForce', 5, 50);
+                gui.add(this.params, 'attractForce', 0.05, 0.3);
+                gui.add(this.params, 'damping', 0.9, 0.99);
+                gui.add(this.params, 'fullscreen').name('Toggle Fullscreen');
+            }
+
+            toggleFullscreen() {
+                if (!document.fullscreenElement) {
+                    document.documentElement.requestFullscreen();
+                } else {
+                    document.exitFullscreen();
+                }
+            }
+
+            onWindowResize() {
+                this.camera.aspect = window.innerWidth / window.innerHeight;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+
+            animate() {
+                requestAnimationFrame(this.animate.bind(this));
+
+                // Update particles
+                this.updateParticles();
+
+                // Render
+                this.renderer.render(this.scene, this.camera);
+            }
+        }
+
+        // Start app
+        window.addEventListener('load', () => {
+            new ParticleTextApp();
+        });
+    </script>
+</body>
+
+</html>
